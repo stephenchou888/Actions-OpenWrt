@@ -1,0 +1,103 @@
+name: Official SDK + ImageBuilder Pipeline
+
+on:
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.zst
+  IB_URL: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-imagebuilder-23.05.5-x86-64.Linux-x86_64.tar.zst
+
+jobs:
+  build-packages:
+    name: Step 1 - Compile Custom IPKs
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Build Tools
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential ccache gawk git gettext libncurses5-dev libssl-dev zlib1g-dev zstd
+
+    - name: Setup SDK & Feeds
+      run: |
+        wget -q $SDK_URL -O sdk.tar.zst
+        tar -I zstd -xf sdk.tar.zst
+        mv openwrt-sdk-* sdk
+        cd sdk
+
+        # 引入你的两个仓库作为源
+        echo 'src-git small https://github.com/stephenchou888/small' >> feeds.conf.default
+        echo 'src-git custompkgs https://github.com/stephenchou888/openwrt-packages' >> feeds.conf.default
+
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Compile Selected Packages
+      run: |
+        cd sdk
+        # 仅针对目标应用单独编译为 ipk（不编译系统和内核，速度极快）
+        make package/luci-app-passwall/compile -j$(nproc) || make package/luci-app-passwall/compile V=s
+
+        # 收集编译产出的所有 .ipk
+        mkdir -p $GITHUB_WORKSPACE/custom-ipks
+        find bin/packages/ -name "*.ipk" -exec cp {} $GITHUB_WORKSPACE/custom-ipks/ \;
+
+    - name: Upload IPKs Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: custom-ipks
+        path: custom-ipks/
+
+  pack-firmware:
+    name: Step 2 - Assemble into Official OpenWrt
+    needs: build-packages
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Download Custom IPKs
+      uses: actions/download-artifact@v4
+      with:
+        name: custom-ipks
+        path: custom-ipks
+
+    - name: Setup Image Builder
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install zstd
+        wget -q $IB_URL -O ib.tar.zst
+        tar -I zstd -xf ib.tar.zst
+        mv openwrt-imagebuilder-* ib
+        cd ib
+
+        # 将 Step 1 编译出来的所有 ipk 注入构建器的 packages 目录
+        mkdir -p packages
+        cp -r $GITHUB_WORKSPACE/custom-ipks/* packages/
+
+        # 允许未签名本地包
+        sed -i 's/option check_signature/# option check_signature/g' repositories.conf
+
+        # 配置默认后台 IP
+        mkdir -p files/etc/uci-defaults
+        cat << 'EOF' > files/etc/uci-defaults/99-custom-ip
+        uci set network.lan.ipaddr='192.168.50.5'
+        uci commit network
+        EOF
+
+    - name: Make Image
+      run: |
+        cd ib
+        make image PROFILE="generic" \
+          PACKAGES="luci luci-base luci-compat luci-theme-argon luci-app-passwall curl wget-ssl" \
+          FILES="files"
+
+        mkdir -p $GITHUB_WORKSPACE/firmware
+        cp bin/targets/x86/64/*-combined-efi.img.gz $GITHUB_WORKSPACE/firmware/ 2>/dev/null || cp bin/targets/x86/64/*-combined.img.gz $GITHUB_WORKSPACE/firmware/
+
+    - name: Upload Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: official-sdk-${{ github.run_id }}
+        files: firmware/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
