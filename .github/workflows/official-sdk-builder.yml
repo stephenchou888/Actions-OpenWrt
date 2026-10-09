@@ -1,11 +1,12 @@
 name: Official SDK + ImageBuilder Pipeline
 
 on:
+  repository_dispatch:
   workflow_dispatch:
 
 env:
-  RELEASE_VER: "23.05.4"
-  TARGET_ARCH: "x86/64"
+  RELEASE_VER: "23.05.5"
+  OPENWRT_ARCH: "x86/64"
   TZ: Asia/Shanghai
 
 jobs:
@@ -20,37 +21,42 @@ jobs:
       run: |
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install build-essential ccache gawk git gettext libncurses5-dev libssl-dev zlib1g-dev xz-utils
+        sudo timedatectl set-timezone "$TZ"
 
     - name: Setup SDK & Feeds
       run: |
-        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.TARGET_ARCH }}"
+        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.OPENWRT_ARCH }}"
         
-        # 1. 动态抓取真实的官方 SDK 文件名（避免 404）
+        # 1. 动态获取官方 SDK 真实文件名并下载
         SDK_FILE=$(curl -sL "${BASE_URL}/sha256sums" | grep -o 'openwrt-sdk-.*\.tar\.xz' | head -n 1)
         echo "Downloading SDK: ${SDK_FILE}"
         wget "${BASE_URL}/${SDK_FILE}" -O sdk.tar.xz
         
-        # 2. 解压并进入 SDK 目录
+        # 2. 解压进入 SDK
         tar -xf sdk.tar.xz
         rm -f sdk.tar.xz
         mv openwrt-sdk-* sdk
         cd sdk
 
-        # 3. 引入你的两个依赖与插件仓库
+        # 3. 引入你的依赖仓库与应用仓库
         echo 'src-git small https://github.com/stephenchou888/small' >> feeds.conf.default
         echo 'src-git custompkgs https://github.com/stephenchou888/openwrt-packages' >> feeds.conf.default
 
-        # 4. 更新并安装 feeds
+        # 4. 更新 feeds 并升级 Golang 环境
         ./scripts/feeds update -a
+        rm -rf feeds/packages/lang/golang
+        git clone https://github.com/sbwml/packages_lang_golang -b 24.x feeds/packages/lang/golang
+        
         ./scripts/feeds install -a
+        make defconfig
 
     - name: Compile Selected Packages
       run: |
         cd sdk
-        # 仅针对目标应用单独编译为 ipk（不编译系统内核，速度快）
+        # 编译 passwall 及其依赖为独立 ipk
         make package/luci-app-passwall/compile -j$(nproc) || make package/luci-app-passwall/compile V=s
 
-        # 收集产出的所有 .ipk 文件
+        # 归档编译产物
         mkdir -p $GITHUB_WORKSPACE/custom-ipks
         find bin/packages/ -name "*.ipk" -exec cp {} $GITHUB_WORKSPACE/custom-ipks/ \;
 
@@ -75,10 +81,11 @@ jobs:
       run: |
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install xz-utils
+        sudo timedatectl set-timezone "$TZ"
         
-        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.TARGET_ARCH }}"
+        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.OPENWRT_ARCH }}"
         
-        # 动态抓取官方 Image Builder 文件名
+        # 动态获取官方 Image Builder 文件名并下载
         IB_FILE=$(curl -sL "${BASE_URL}/sha256sums" | grep -o 'openwrt-imagebuilder-.*\.tar\.xz' | head -n 1)
         echo "Downloading Image Builder: ${IB_FILE}"
         wget "${BASE_URL}/${IB_FILE}" -O ib.tar.xz
@@ -88,17 +95,17 @@ jobs:
         mv openwrt-imagebuilder-* ib
         cd ib
 
-        # 将 Step 1 编译出来的所有 ipk 注入 packages 目录
+        # 将第一步编译出来的全部自定义 ipk 注入构建器
         mkdir -p packages
         cp -r $GITHUB_WORKSPACE/custom-ipks/* packages/
 
-        # 允许未签名本地包
+        # 允许加载未签名的本地自定义插件
         sed -i 's/option check_signature/# option check_signature/g' repositories.conf
 
-        # 配置默认后台 IP 为 192.168.50.5
+        # 配置默认后台管理网关地址为 192.168.1.1
         mkdir -p files/etc/uci-defaults
         cat << 'EOF' > files/etc/uci-defaults/99-custom-ip
-        uci set network.lan.ipaddr='192.168.50.5'
+        uci set network.lan.ipaddr='192.168.1.1'
         uci commit network
         EOF
 
@@ -106,16 +113,24 @@ jobs:
       run: |
         cd ib
         make image PROFILE="generic" \
-          PACKAGES="luci luci-base luci-compat luci-theme-argon luci-app-passwall curl wget-ssl" \
+          PACKAGES="luci \
+                    luci-base \
+                    luci-compat \
+                    luci-theme-argon \
+                    luci-app-passwall \
+                    curl \
+                    wget-ssl" \
           FILES="files"
 
         mkdir -p $GITHUB_WORKSPACE/firmware
         cp bin/targets/x86/64/*-combined-efi.img.gz $GITHUB_WORKSPACE/firmware/ 2>/dev/null || cp bin/targets/x86/64/*-combined.img.gz $GITHUB_WORKSPACE/firmware/
+        cd $GITHUB_WORKSPACE/firmware
+        sha256sum * > sha256sums.txt
 
     - name: Upload Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: official-sdk-${{ github.run_id }}
+        tag_name: official-x86-${{ github.run_id }}
         files: firmware/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
