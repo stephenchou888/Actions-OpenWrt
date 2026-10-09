@@ -17,3 +17,8 @@ sed -i 's/192.168.1.1/192.168.50.5/g' package/base-files/files/bin/config_genera
 # 4. 开启 ccache 编译加速
 sed -i '/CONFIG_CCACHE/d' .config 2>/dev/null || true
 echo "CONFIG_CCACHE=y" >> .config
+
+# 5. 修复 dnsmasq 与 dnsmasq-full 文件冲突，确保 passwall 只使用 dnsmasq-full
+sed -i '/CONFIG_PACKAGE_dnsmasq/d;/CONFIG_PACKAGE_dnsmasq-full/d' .config 2>/dev/null || true
+echo "CONFIG_PACKAGE_dnsmasq=n" >> .config
+echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
