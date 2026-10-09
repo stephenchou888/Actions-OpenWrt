@@ -18,3 +18,9 @@
 
 # Modify hostname
 #sed -i 's/OpenWrt/P3TERX-Router/g' package/base-files/files/bin/config_generate
+
+# 修复 feeds/helloworld/gn 在 GCC 12 下的编译错误
+rm -rf feeds/helloworld/gn
+git clone --depth 1 https://github.com/openwrt/packages.git -b master temp-packages
+cp -r temp-packages/devel/gn feeds/helloworld/gn
+rm -rf temp-packages
