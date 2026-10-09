@@ -15,6 +15,17 @@ name: OpenWrt X64_full Builder
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ssh_debug:
+        description: '编译失败时挂起 SSH 调试 (tmate)'
+        required: false
+        type: boolean
+        default: false
+      clean_cache:
+        description: '强制清空缓存重新下载'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -54,12 +65,12 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        git clone $REPO_URL -b$REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e $FEEDS_CONF ] && mv$FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -73,10 +84,19 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        [ -e $CONFIG_FILE ] && mv$CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Cache dl directory
+      if: inputs.clean_cache != true
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-dl-
 
     - name: Download package
       id: package
@@ -92,11 +112,24 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        set -o pipefail
+        make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"\%Y\%m\%d\%H\%M")" >> $GITHUB_ENV
+
+    - name: Record error summary on failure
+      if: failure() && steps.compile.outcome == 'failure'
+      run: |
+        echo "### ❌ 编译失败日志摘要（最后 80 行）" >> $GITHUB_STEP_SUMMARY
+        echo '```text' >> $GITHUB_STEP_SUMMARY
+        tail -n 80 openwrt/build.log >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: SSH connection on failure
+      uses: mxschmitt/action-tmate@v3
+      if: failure() && steps.compile.outcome == 'failure' && inputs.ssh_debug == true
 
     - name: Check space usage
       if: (!cancelled())
@@ -111,7 +144,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -125,12 +158,25 @@ jobs:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: Generate release tag
+    - name: Generate release metadata
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
+        echo "release_tag=$(date +"\%Y.\%m.\%d-\%H\%M")" >> $GITHUB_OUTPUT
+        cd ${{ env.FIRMWARE }}
+        sha256sum * > sha256sums.txt 2>/dev/null || true
+        cd -
+        KERNEL_VER=$(grep 'LINUX_VERSION:=' openwrt/target/linux/x86/Makefile | cut -d= -f2 | tr -d ' ' || echo "Unknown")
+        cat <<EOF > release.txt
+        ### 固件构建信息
+        - **内核版本**: Linux ${KERNEL_VER}
+        - **构建时间**: $(date "+%Y-%m-%d %H:%M:%S")
+        - **上游源码**: ${{ env.REPO_URL }} (${{ env.REPO_BRANCH }})
+        - **源码提交**: $(git -C openwrt rev-parse --short HEAD)
+
+        ### 校验说明
+        刷机前请核对压缩包目录下的 \`sha256sums.txt\` 文件以校验完整性。
+        EOF
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
