@@ -1,31 +1,39 @@
 #!/bin/bash
 #
-# https://github.com/P3TERX/Actions-OpenWrt
 # File name: diy-part2.sh
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 #
 
 # ==================== 1. 自定义固件设置 ====================
-# 修改默认管理 IP（根据你的需求修改，如改为 192.168.50.5 或 192.168.2.1）
+# 修改默认 IP 为 192.168.50.5（如不需要可注释掉）
 sed -i 's/192.168.1.1/192.168.50.5/g' package/base-files/files/bin/config_generate
 
-# 修改主机名（显示在终端和概览页的名称）
+# 修改主机名
 sed -i 's/OpenWrt/P3TERX-Router/g' package/base-files/files/bin/config_generate
 
-# 修改默认主题为 argon（需确保 .config 或 feeds 中已勾选 luci-theme-argon）
-# sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
 
-# ==================== 2. 编译报错修复与环境增强 ====================
-# 修复 feeds/helloworld/gn 在 GCC 12 下的 C++20 ranges 编译冲突
+# ==================== 2. 彻底清理冲突组件 ====================
+# 彻底清理 gn 与 naiveproxy（避免 GCC 12 的 C++20 报错）
 rm -rf feeds/helloworld/gn
-git clone --depth 1 https://github.com/openwrt/packages.git -b master temp-packages
-cp -r temp-packages/devel/gn feeds/helloworld/gn
-rm -rf temp-packages
+rm -rf feeds/helloworld/naiveproxy
+sed -i '/CONFIG_PACKAGE_naiveproxy/d' .config 2>/dev/null || true
+sed -i '/CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy/d' .config 2>/dev/null || true
 
-# 升级 Golang 到 23.x（适配新版 Passwall/OpenClash 等插件）
+# 彻底清理 hysteria（解决本次 go >= 1.25.0 报错）
+# 如果你确定必须要用 Hysteria，请注释掉下面两行，并改用下方的 Golang 25.x
+rm -rf feeds/helloworld/hysteria
+sed -i '/CONFIG_PACKAGE_hysteria/d' .config 2>/dev/null || true
+sed -i '/CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Hysteria/d' .config 2>/dev/null || true
+
+
+# ==================== 3. 升级 Golang 依赖环境 ====================
+# 升级 Golang 到 24.x/25.x 现代分支（适配 Passwall/OpenClash 等主流插件）
 rm -rf feeds/packages/lang/golang
-git clone https://github.com/sbwml/packages_lang_golang -b 23.x feeds/packages/lang/golang
+git clone https://github.com/sbwml/packages_lang_golang -b 24.x feeds/packages/lang/golang || \
+git clone https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
 
+
+# ==================== 4. 清理同名插件与配置加速 ====================
 # 清理重复的 luci 插件包防冲突
 find package/ -type d -name "luci-app-*" | while read -r dir; do
   name=$(basename "$dir")
