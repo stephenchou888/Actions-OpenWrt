@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
 
 env:
-  SDK_URL: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.zst
-  IB_URL: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-imagebuilder-23.05.5-x86-64.Linux-x86_64.tar.zst
+  RELEASE_VER: "23.05.4"
+  TARGET_ARCH: "x86/64"
+  TZ: Asia/Shanghai
 
 jobs:
   build-packages:
@@ -18,29 +19,38 @@ jobs:
     - name: Install Build Tools
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install build-essential ccache gawk git gettext libncurses5-dev libssl-dev zlib1g-dev zstd
+        sudo -E apt-get -qq install build-essential ccache gawk git gettext libncurses5-dev libssl-dev zlib1g-dev xz-utils
 
     - name: Setup SDK & Feeds
       run: |
-        wget -q $SDK_URL -O sdk.tar.zst
-        tar -I zstd -xf sdk.tar.zst
+        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.TARGET_ARCH }}"
+        
+        # 1. 动态抓取真实的官方 SDK 文件名（避免 404）
+        SDK_FILE=$(curl -sL "${BASE_URL}/sha256sums" | grep -o 'openwrt-sdk-.*\.tar\.xz' | head -n 1)
+        echo "Downloading SDK: ${SDK_FILE}"
+        wget "${BASE_URL}/${SDK_FILE}" -O sdk.tar.xz
+        
+        # 2. 解压并进入 SDK 目录
+        tar -xf sdk.tar.xz
+        rm -f sdk.tar.xz
         mv openwrt-sdk-* sdk
         cd sdk
 
-        # 引入你的两个仓库作为源
+        # 3. 引入你的两个依赖与插件仓库
         echo 'src-git small https://github.com/stephenchou888/small' >> feeds.conf.default
         echo 'src-git custompkgs https://github.com/stephenchou888/openwrt-packages' >> feeds.conf.default
 
+        # 4. 更新并安装 feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
     - name: Compile Selected Packages
       run: |
         cd sdk
-        # 仅针对目标应用单独编译为 ipk（不编译系统和内核，速度极快）
+        # 仅针对目标应用单独编译为 ipk（不编译系统内核，速度快）
         make package/luci-app-passwall/compile -j$(nproc) || make package/luci-app-passwall/compile V=s
 
-        # 收集编译产出的所有 .ipk
+        # 收集产出的所有 .ipk 文件
         mkdir -p $GITHUB_WORKSPACE/custom-ipks
         find bin/packages/ -name "*.ipk" -exec cp {} $GITHUB_WORKSPACE/custom-ipks/ \;
 
@@ -64,20 +74,28 @@ jobs:
     - name: Setup Image Builder
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install zstd
-        wget -q $IB_URL -O ib.tar.zst
-        tar -I zstd -xf ib.tar.zst
+        sudo -E apt-get -qq install xz-utils
+        
+        BASE_URL="https://downloads.openwrt.org/releases/${{ env.RELEASE_VER }}/targets/${{ env.TARGET_ARCH }}"
+        
+        # 动态抓取官方 Image Builder 文件名
+        IB_FILE=$(curl -sL "${BASE_URL}/sha256sums" | grep -o 'openwrt-imagebuilder-.*\.tar\.xz' | head -n 1)
+        echo "Downloading Image Builder: ${IB_FILE}"
+        wget "${BASE_URL}/${IB_FILE}" -O ib.tar.xz
+        
+        tar -xf ib.tar.xz
+        rm -f ib.tar.xz
         mv openwrt-imagebuilder-* ib
         cd ib
 
-        # 将 Step 1 编译出来的所有 ipk 注入构建器的 packages 目录
+        # 将 Step 1 编译出来的所有 ipk 注入 packages 目录
         mkdir -p packages
         cp -r $GITHUB_WORKSPACE/custom-ipks/* packages/
 
         # 允许未签名本地包
         sed -i 's/option check_signature/# option check_signature/g' repositories.conf
 
-        # 配置默认后台 IP
+        # 配置默认后台 IP 为 192.168.50.5
         mkdir -p files/etc/uci-defaults
         cat << 'EOF' > files/etc/uci-defaults/99-custom-ip
         uci set network.lan.ipaddr='192.168.50.5'
