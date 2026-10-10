@@ -1,0 +1,205 @@
+name: 02-Package OpenWrt Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      rootfs_size:
+        description: '系统根分区大小 (单位 MB，建议 1024~2048)'
+        required: true
+        type: string
+        default: '1024'
+
+      # --- 代理与网络加速 ---
+      include_openclash:
+        description: '【代理】OpenClash'
+        type: boolean
+        default: false
+      include_passwall:
+        description: '【代理】PassWall'
+        type: boolean
+        default: false
+      include_ssrplus:
+        description: '【代理】SSR-Plus'
+        type: boolean
+        default: false
+      include_turboacc:
+        description: '【网络】TurboACC 网络加速'
+        type: boolean
+        default: true
+      include_smartdns:
+        description: '【DNS】SmartDNS 本地加速防污染'
+        type: boolean
+        default: false
+      include_adguardhome:
+        description: '【去广告】AdGuard Home'
+        type: boolean
+        default: false
+
+      # --- 内网穿透与远程访问 ---
+      include_zerotier:
+        description: '【远程】ZeroTier 虚拟内网互联'
+        type: boolean
+        default: false
+      include_lucky:
+        description: '【远程】Lucky 大吉 (动态公网与反向代理)'
+        type: boolean
+        default: false
+      include_ddns:
+        description: '【远程】动态 DNS (DDNS)'
+        type: boolean
+        default: true
+      include_frpc:
+        description: '【远程】Frp 内网穿透客户端'
+        type: boolean
+        default: false
+
+      # --- 存储与容器服务 ---
+      include_docker:
+        description: '【容器】Docker CE 容器与管理面板'
+        type: boolean
+        default: false
+      include_diskman:
+        description: '【存储】DiskMan 磁盘管理与分区挂载'
+        type: boolean
+        default: true
+      include_samba4:
+        description: '【共享】Samba4 网络共享 (局域网 NAS)'
+        type: boolean
+        default: false
+      include_aria2:
+        description: '【下载】Aria2 下载器'
+        type: boolean
+        default: false
+      include_qbittorrent:
+        description: '【下载】qBittorrent BT下载'
+        type: boolean
+        default: false
+
+      # --- 系统与网络管控工具 ---
+      include_ttyd:
+        description: '【系统】TTYD 网页终端命令行'
+        type: boolean
+        default: true
+      include_wol:
+        description: '【系统】Wake on LAN 局域网网络唤醒'
+        type: boolean
+        default: false
+      include_eqos:
+        description: '【流控】EQOS 局域网网速与流量控制'
+        type: boolean
+        default: false
+      include_autoreboot:
+        description: '【维护】定时自动重启'
+        type: boolean
+        default: false
+      include_serverchan:
+        description: '【推送】全能推送 / 微信通知 (PushBot)'
+        type: boolean
+        default: false
+
+      # --- 手动填入扩展包名 ---
+      extra_packages:
+        description: '手动填入额外插件包名 (空格分隔，见下方软件参考清单)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Install Pack Tools
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential libncurses5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget curl zstd
+        sudo timedatectl set-timezone "Asia/Shanghai"
+
+    - name: Download ImageBuilder from Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release download ImageBuilder_x86_64 \
+          --pattern "openwrt-imagebuilder-*.tar.*" \
+          --repo ${{ github.repository }} \
+          --clobber
+        
+        mkdir -p ib
+        tar -xf openwrt-imagebuilder-*.tar.* -C ib --strip-components 1
+        rm -f openwrt-imagebuilder-*.tar.*
+
+    - name: Configure Rootfs Partition Size
+      run: |
+        sed -i "s/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}/" ib/.config
+
+    - name: Assemble Selected Packages
+      run: |
+        # 基础必装 UI 与环境
+        PACKAGES="luci luci-base luci-compat luci-theme-argon"
+
+        # 核心代理与网络加速
+        [ "${{ inputs.include_openclash }}" = "true" ] && PACKAGES="$PACKAGES luci-app-openclash"
+        [ "${{ inputs.include_passwall }}" = "true" ] && PACKAGES="$PACKAGES luci-app-passwall"
+        [ "${{ inputs.include_ssrplus }}" = "true" ] && PACKAGES="$PACKAGES luci-app-ssr-plus"
+        [ "${{ inputs.include_turboacc }}" = "true" ] && PACKAGES="$PACKAGES luci-app-turboacc"
+        [ "${{ inputs.include_smartdns }}" = "true" ] && PACKAGES="$PACKAGES luci-app-smartdns"
+        [ "${{ inputs.include_adguardhome }}" = "true" ] && PACKAGES="$PACKAGES luci-app-adguardhome"
+
+        # 内网穿透与远程
+        [ "${{ inputs.include_zerotier }}" = "true" ] && PACKAGES="$PACKAGES luci-app-zerotier"
+        [ "${{ inputs.include_lucky }}" = "true" ] && PACKAGES="$PACKAGES luci-app-lucky"
+        [ "${{ inputs.include_ddns }}" = "true" ] && PACKAGES="$PACKAGES luci-app-ddns"
+        [ "${{ inputs.include_frpc }}" = "true" ] && PACKAGES="$PACKAGES luci-app-frpc"
+
+        # 存储与下载
+        [ "${{ inputs.include_docker }}" = "true" ] && PACKAGES="$PACKAGES luci-app-dockerman docker-compose"
+        [ "${{ inputs.include_diskman }}" = "true" ] && PACKAGES="$PACKAGES luci-app-diskman"
+        [ "${{ inputs.include_samba4 }}" = "true" ] && PACKAGES="$PACKAGES luci-app-samba4"
+        [ "${{ inputs.include_aria2 }}" = "true" ] && PACKAGES="$PACKAGES luci-app-aria2"
+        [ "${{ inputs.include_qbittorrent }}" = "true" ] && PACKAGES="$PACKAGES luci-app-qbittorrent"
+
+        # 系统与运维管控
+        [ "${{ inputs.include_ttyd }}" = "true" ] && PACKAGES="$PACKAGES luci-app-ttyd"
+        [ "${{ inputs.include_wol }}" = "true" ] && PACKAGES="$PACKAGES luci-app-wol"
+        [ "${{ inputs.include_eqos }}" = "true" ] && PACKAGES="$PACKAGES luci-app-eqos"
+        [ "${{ inputs.include_autoreboot }}" = "true" ] && PACKAGES="$PACKAGES luci-app-autoreboot"
+        [ "${{ inputs.include_serverchan }}" = "true" ] && PACKAGES="$PACKAGES luci-app-serverchan"
+
+        # 追加手动填写的额外包名
+        if [ -n "${{ inputs.extra_packages }}" ]; then
+          PACKAGES="$PACKAGES ${{ inputs.extra_packages }}"
+        fi
+
+        echo "FINAL_PACKAGES=$PACKAGES" >> $GITHUB_ENV
+        echo "### 📦 本次打包组件清单" >> $GITHUB_STEP_SUMMARY
+        echo "$PACKAGES" >> $GITHUB_STEP_SUMMARY
+
+    - name: Build Firmware Image
+      run: |
+        cd ib
+        make image PROFILE=generic PACKAGES="${{ env.FINAL_PACKAGES }}"
+
+    - name: Collect Firmware Output
+      id: organize
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/firmware_out
+        find ib/bin/targets/x86/64/ -type f \( -name "*.img.gz" -o -name "*.iso" \) -exec cp {} $GITHUB_WORKSPACE/firmware_out/ \;
+        cd $GITHUB_WORKSPACE/firmware_out
+        sha256sum * > sha256sums.txt
+        echo "TAG_NAME=Firmware_$(date +"%Y%m%d_%H%M")" >> $GITHUB_ENV
+
+    - name: Upload Firmware to Release
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.TAG_NAME }}
+        name: "OpenWrt x86_64 定制固件"
+        body_path: $GITHUB_WORKSPACE/firmware_out/sha256sums.txt
+        files: ${{ github.workspace }}/firmware_out/*
