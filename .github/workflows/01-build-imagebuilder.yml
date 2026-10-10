@@ -73,13 +73,22 @@ jobs:
         if [ -e "$CONFIG_FILE" ]; then
           cp $CONFIG_FILE openwrt/.config
         else
-          # 若无配置文件则生成默认 x86_64 基础配置
           cat <<EOF > openwrt/.config
         CONFIG_TARGET_x86=y
         CONFIG_TARGET_x86_64=y
         CONFIG_TARGET_x86_64_DEVICE_generic=y
         EOF
         fi
+
+        # 进入 openwrt 根目录执行后续操作
+        cd openwrt
+        [ -e $GITHUB_WORKSPACE/$DIY_P2_SH ] && chmod +x $GITHUB_WORKSPACE/$DIY_P2_SH && $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 确保开启 Image Builder 构建
+        sed -i '/CONFIG_IB/d' .config
+        echo "CONFIG_IB=y" >> .config
+        
+        make defconfig
         
         # 核心：确保开启 Image Builder 构建
         sed -i '/CONFIG_IB/d' openwrt/.config
