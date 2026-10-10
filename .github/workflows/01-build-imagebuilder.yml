@@ -1,0 +1,135 @@
+name: 01-Build OpenWrt ImageBuilder
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: '强制清空缓存重新下载编译'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: full.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz mkisofs msmtp nano ninja-build p7zip-full patch pkgconf python3 python3-pip python3-ply python3-setuptools rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xz-utils zlib1g-dev zstd
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone Source Code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone --depth 1 $REPO_URL -b$REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Inject Custom Feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv$FEEDS_CONF openwrt/feeds.conf.default
+        cd openwrt
+        # 注入你的自定义插件源仓库
+        echo 'src-git custom_packages https://github.com/stephenchou888/openwrt-packages.git' >> feeds.conf.default
+        echo 'src-git custom_small https://github.com/stephenchou888/small.git' >> feeds.conf.default
+        [ -e $GITHUB_WORKSPACE/$DIY_P1_SH ] && chmod +x $GITHUB_WORKSPACE/$DIY_P1_SH && $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load Configuration & Enable ImageBuilder
+      run: |
+        [ -e files ] && mv files openwrt/files
+        if [ -e "$CONFIG_FILE" ]; then
+          cp $CONFIG_FILE openwrt/.config
+        else
+          # 若无配置文件则生成默认 x86_64 基础配置
+          cat <<EOF > openwrt/.config
+        CONFIG_TARGET_x86=y
+        CONFIG_TARGET_x86_64=y
+        CONFIG_TARGET_x86_64_DEVICE_generic=y
+        EOF
+        fi
+        
+        # 核心：确保开启 Image Builder 构建
+        sed -i '/CONFIG_IB/d' openwrt/.config
+        echo "CONFIG_IB=y" >> openwrt/.config
+        
+        [ -e $GITHUB_WORKSPACE/$DIY_P2_SH ] && chmod +x $GITHUB_WORKSPACE/$DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
+        cd openwrt
+        make defconfig
+
+    - name: Cache DL Directory
+      if: ${{ !inputs.clean_cache }}
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-dl-
+
+    - name: Download Package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Toolchain and ImageBuilder
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 V=s
+
+    - name: Prepare ImageBuilder Release
+      id: release_prep
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/ib_release
+        find openwrt/bin/targets/x86/64/ -name "openwrt-imagebuilder-*.tar.*" -exec cp {} $GITHUB_WORKSPACE/ib_release/ \;
+        cd $GITHUB_WORKSPACE/ib_release
+        sha256sum * > sha256sums.txt
+        echo "IB_PATH=$GITHUB_WORKSPACE/ib_release" >> $GITHUB_ENV
+        echo "RELEASE_TAG=ImageBuilder_x86_64" >> $GITHUB_ENV
+
+    - name: Upload ImageBuilder to Release
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: "OpenWrt x86_64 Image Builder 底座仓库"
+        body: |
+          ### 构建信息
+          - 包含了 OpenWrt x86_64 工具链与全部编译完毕的独立 IPK 插件池。
+          - 供工作流 `02-package-firmware.yml` 进行 2 分钟极速勾选打包。
+        files: ${{ env.IB_PATH }}/*
