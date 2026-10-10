@@ -87,7 +87,6 @@ jobs:
         # 确保开启 Image Builder 构建
         sed -i '/CONFIG_IB/d' .config
         echo "CONFIG_IB=y" >> .config
-        
         make defconfig
         
         # 核心：确保开启 Image Builder 构建
